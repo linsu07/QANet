@@ -112,6 +112,9 @@ def conv_block(inputs, num_conv_layers, kernel_size, num_filters,
                seq_len = None, scope = "conv_block", is_training = True,
                reuse = None, bias = True, dropout = 0.0, sublayers = (1, 1)):
     with tf.variable_scope(scope, reuse = reuse):
+
+        # inputs is  [batch_size, seq_len, d_model]
+        #[batch_size, seq_len, 1, d_model]
         outputs = tf.expand_dims(inputs,2)
         l, L = sublayers
         for i in range(num_conv_layers):
@@ -216,6 +219,9 @@ def mask_logits(inputs, mask, mask_value = -1e30):
 def depthwise_separable_convolution(inputs, kernel_size, num_filters,
                                     scope = "depthwise_separable_convolution",
                                     bias = True, is_training = True, reuse = None):
+
+    # [batch_size, seq_len, 1, d_model]
+
     with tf.variable_scope(scope, reuse = reuse):
         shapes = inputs.shape.as_list()
         depthwise_filter = tf.get_variable("depthwise_filter",
@@ -228,6 +234,7 @@ def depthwise_separable_convolution(inputs, kernel_size, num_filters,
                                         dtype = tf.float32,
                                         regularizer=regularizer,
                                         initializer = initializer_relu())
+        #[batch_size,seq_len,1,d_model(num_filters)]
         outputs = tf.nn.separable_conv2d(inputs,
                                         depthwise_filter,
                                         pointwise_filter,
@@ -403,6 +410,7 @@ def ndim(x):
     return None
 
 def dot(x, y):
+    #[batch,c_len,size]*[ size,1]
     """Modified from keras==2.0.6
     Multiplies 2 tensors (and/or variables) and returns a *tensor*.
 
@@ -537,8 +545,12 @@ def optimized_trilinear_for_attention(args, c_maxlen, q_maxlen, input_keep_prob=
             dtype=dtype,
             regularizer=regularizer,
             initializer=bias_initializer)
+        #[batch,c_len,size]*[ size,1]  -> [ batch,c_len,q_len]
         subres0 = tf.tile(dot(droped_args[0], weights4arg0), [1, 1, q_maxlen])
+        #[ batch,q_len,1]->[batch,c_len,q_len]
         subres1 = tf.tile(tf.transpose(dot(droped_args[1], weights4arg1), perm=(0, 2, 1)), [1, c_maxlen, 1])
+
+        #[batch,c_len,size] * [batch,size,q_len,size]
         subres2 = batch_dot(droped_args[0] * weights4mlu, tf.transpose(droped_args[1], perm=(0, 2, 1)))
         res = subres0 + subres1 + subres2
         nn_ops.bias_add(res, biases)

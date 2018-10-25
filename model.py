@@ -1,10 +1,19 @@
+import collections
+
 import tensorflow as tf
+from tensorflow.contrib.layers import xavier_initializer
+
 from layers import initializer, regularizer, residual_block, highway, conv, mask_logits, trilinear, total_params, optimized_trilinear_for_attention
+from networks.QAnet_contextual_embedding import QAnetEmbedding
+from networks.QAnet_modelling_blocks import QaModelBlock
+from networks.parameter import user_params
+
 
 class Model(object):
     def __init__(self, config, batch, word_mat=None, char_mat=None, trainable=True, opt=True, demo = False, graph = None):
         self.config = config
         self.demo = demo
+        self.trainable = trainable
         self.graph = graph if graph is not None else tf.Graph()
         with self.graph.as_default():
 
@@ -98,36 +107,79 @@ class Model(object):
             c_emb = highway(c_emb, size = d, scope = "highway", dropout = self.dropout, reuse = None)
             q_emb = highway(q_emb, size = d, scope = "highway", dropout = self.dropout, reuse = True)
 
-        with tf.variable_scope("Embedding_Encoder_Layer"):
-            c = residual_block(c_emb,
-                num_blocks = 1,
-                num_conv_layers = 4,
-                kernel_size = 7,
-                mask = self.c_mask,
-                num_filters = d,
-                num_heads = nh,
-                seq_len = self.c_len,
-                scope = "Encoder_Residual_Block",
-                bias = False,
-                dropout = self.dropout)
-            q = residual_block(q_emb,
-                num_blocks = 1,
-                num_conv_layers = 4,
-                kernel_size = 7,
-                mask = self.q_mask,
-                num_filters = d,
-                num_heads = nh,
-                seq_len = self.q_len,
-                scope = "Encoder_Residual_Block",
-                reuse = True, # Share the weights between passage and question
-                bias = False,
-                dropout = self.dropout)
+        with tf.variable_scope("Embedding_Encoder_Layer",initializer=xavier_initializer()):
 
-        with tf.variable_scope("Context_to_Query_Attention_Layer"):
+            from networks import QAnet_contextual_embedding
+            params=user_params(procedure=None,
+                               label_name=None,learning_rate=None,
+                               embed_size=None,
+                               embedding_file_path=None,
+                               context_name="context",question_name="question",
+                               rnn_hidden_size=None,data_dir=None,model_dir=None,
+                               batch_size=None,drop_out_rate=self.dropout,p1=None,
+                               p2=None,feature_voc_file_path=None,
+                               gpu_cores_list=None,
+                               transfromer_conv_layers = 4,
+                               transfromer_conv_kernel_size = 7
+                               ,transfromer_head_number = nh
+                               ,tansformer_d_model = d
+                               ,clip_norm = None
+                               ,use_char_embedding = None
+                               ,char_embedding_size = None
+                               ,char_feature_name = None
+                               ,char_question_name = None
+                               ,example_max_length = None
+                               ,enable_ema=None
+                               ,ema_decay= None
+                               ,char_filters =None
+                               ,ans_limit = None
+                               )
+            encoder = QAnetEmbedding(
+                params,d ,self.trainable
+            )
+            input = {
+                params.context_name :c_emb
+                ,params.question_name:q_emb
+                ,"context_mask":tf.cast(tf.expand_dims(tf.sign(self.c),-1),tf.float32)
+                ,"question_mask":tf.cast(tf.expand_dims(tf.sign(self.q),-1),tf.float32)
+
+            }
+            output = encoder(input)
+            c = output[params.context_name]
+            q= output[params.question_name]
+
+
+            # c = residual_block(c_emb,
+            #     num_blocks = 1,
+            #     num_conv_layers = 4,
+            #     kernel_size = 7,
+            #     mask = self.c_mask,
+            #     num_filters = d,
+            #     num_heads = nh,
+            #     seq_len = self.c_len,
+            #     scope = "Encoder_Residual_Block",
+            #     bias = False,
+            #     dropout = self.dropout)
+            # q = residual_block(q_emb,
+            #     num_blocks = 1,
+            #     num_conv_layers = 4,
+            #     kernel_size = 7,
+            #     mask = self.q_mask,
+            #     num_filters = d,
+            #     num_heads = nh,
+            #     seq_len = self.q_len,
+            #     scope = "Encoder_Residual_Block",
+            #     reuse = True, # Share the weights between passage and question
+            #     bias = False,
+            #     dropout = self.dropout)
+
+        with tf.variable_scope("Context_to_Query_Attention_Layer",initializer=xavier_initializer()):
             # C = tf.tile(tf.expand_dims(c,2),[1,1,self.q_maxlen,1])
             # Q = tf.tile(tf.expand_dims(q,1),[1,self.c_maxlen,1,1])
             # S = trilinear([C, Q, C*Q], input_keep_prob = 1.0 - self.dropout)
+            #[batch_size,c_len_,q_len]
             S = optimized_trilinear_for_attention([c, q], self.c_maxlen, self.q_maxlen, input_keep_prob = 1.0 - self.dropout)
+            #[batch_size,1,q_len]
             mask_q = tf.expand_dims(self.q_mask, 1)
             S_ = tf.nn.softmax(mask_logits(S, mask = mask_q))
             mask_c = tf.expand_dims(self.c_mask, 2)
@@ -136,27 +188,36 @@ class Model(object):
             self.q2c = tf.matmul(tf.matmul(S_, S_T), c)
             attention_outputs = [c, self.c2q, c * self.c2q, c * self.q2c]
 
-        with tf.variable_scope("Model_Encoder_Layer"):
-            inputs = tf.concat(attention_outputs, axis = -1)
-            self.enc = [conv(inputs, d, name = "input_projection")]
-            for i in range(3):
-                if i % 2 == 0: # dropout every 2 blocks
-                    self.enc[i] = tf.nn.dropout(self.enc[i], 1.0 - self.dropout)
-                self.enc.append(
-                    residual_block(self.enc[i],
-                        num_blocks = 7,
-                        num_conv_layers = 2,
-                        kernel_size = 5,
-                        mask = self.c_mask,
-                        num_filters = d,
-                        num_heads = nh,
-                        seq_len = self.c_len,
-                        scope = "Model_Encoder",
-                        bias = False,
-                        reuse = True if i > 0 else None,
-                        dropout = self.dropout)
-                    )
+        with tf.variable_scope("Model_Encoder_Layer",initializer=xavier_initializer()):
+            from networks import QAnet_modelling_blocks
+            block = QaModelBlock(params,4*d,self.trainable)
+            input = {
+                params.context_name :tf.concat(attention_outputs, axis = -1)
+                ,"context_mask":tf.cast(tf.expand_dims(tf.sign(self.c),-1),tf.float32)
+                ,"question_mask":tf.cast(tf.expand_dims(tf.sign(self.q),-1),tf.float32)
 
+            }
+            output = block(input)
+            # inputs = tf.concat(attention_outputs, axis = -1)
+            # self.enc = [conv(inputs, d, name = "input_projection")]
+            # for i in range(3):
+            #     if i % 2 == 0: # dropout every 2 blocks
+            #         self.enc[i] = tf.nn.dropout(self.enc[i], 1.0 - self.dropout)
+            #     self.enc.append(
+            #         residual_block(self.enc[i],
+            #             num_blocks = 7,
+            #             num_conv_layers = 2,
+            #             kernel_size = 5,
+            #             mask = self.c_mask,
+            #             num_filters = d,
+            #             num_heads = nh,
+            #             seq_len = self.c_len,
+            #             scope = "Model_Encoder",
+            #             bias = False,
+            #             reuse = True if i > 0 else None,
+            #             dropout = self.dropout)
+            #         )
+        self.enc = [None,output["M0"],output["M1"],output["M2"]]
         with tf.variable_scope("Output_Layer"):
             start_logits = tf.squeeze(conv(tf.concat([self.enc[1], self.enc[2]],axis = -1),1, bias = False, name = "start_pointer"),-1)
             end_logits = tf.squeeze(conv(tf.concat([self.enc[1], self.enc[3]],axis = -1),1, bias = False, name = "end_pointer"), -1)
