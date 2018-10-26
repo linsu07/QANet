@@ -6,6 +6,7 @@ from tensorflow.contrib.layers import xavier_initializer
 from layers import initializer, regularizer, residual_block, highway, conv, mask_logits, trilinear, total_params, optimized_trilinear_for_attention
 from networks.QAnet_contextual_embedding import QAnetEmbedding
 from networks.QAnet_modelling_blocks import QaModelBlock
+from networks.QAnet_output import QAOutputLayer
 from networks.parameter import user_params
 
 
@@ -174,25 +175,33 @@ class Model(object):
             #     dropout = self.dropout)
 
         with tf.variable_scope("Context_to_Query_Attention_Layer",initializer=xavier_initializer()):
+
+            from networks.dcn import DcnLayer
+            params.q_seq_len = self.q_maxlen
+            params.sent_number = 1
+            params.c_seq_len = self.c_maxlen
+            params.cur_batch_size = tf.shape(c)[0]
+            dcn = DcnLayer(params,d,self.trainable)
+            output = dcn(output)
             # C = tf.tile(tf.expand_dims(c,2),[1,1,self.q_maxlen,1])
             # Q = tf.tile(tf.expand_dims(q,1),[1,self.c_maxlen,1,1])
             # S = trilinear([C, Q, C*Q], input_keep_prob = 1.0 - self.dropout)
             #[batch_size,c_len_,q_len]
-            S = optimized_trilinear_for_attention([c, q], self.c_maxlen, self.q_maxlen, input_keep_prob = 1.0 - self.dropout)
-            #[batch_size,1,q_len]
-            mask_q = tf.expand_dims(self.q_mask, 1)
-            S_ = tf.nn.softmax(mask_logits(S, mask = mask_q))
-            mask_c = tf.expand_dims(self.c_mask, 2)
-            S_T = tf.transpose(tf.nn.softmax(mask_logits(S, mask = mask_c), dim = 1),(0,2,1))
-            self.c2q = tf.matmul(S_, q)
-            self.q2c = tf.matmul(tf.matmul(S_, S_T), c)
-            attention_outputs = [c, self.c2q, c * self.c2q, c * self.q2c]
+            # S = optimized_trilinear_for_attention([c, q], self.c_maxlen, self.q_maxlen, input_keep_prob = 1.0 - self.dropout)
+            # #[batch_size,1,q_len]
+            # mask_q = tf.expand_dims(self.q_mask, 1)
+            # S_ = tf.nn.softmax(mask_logits(S, mask = mask_q))
+            # mask_c = tf.expand_dims(self.c_mask, 2)
+            # S_T = tf.transpose(tf.nn.softmax(mask_logits(S, mask = mask_c), dim = 1),(0,2,1))
+            # self.c2q = tf.matmul(S_, q)
+            # self.q2c = tf.matmul(tf.matmul(S_, S_T), c)
+            # attention_outputs = [c, self.c2q, c * self.c2q, c * self.q2c]
 
         with tf.variable_scope("Model_Encoder_Layer",initializer=xavier_initializer()):
-            from networks import QAnet_modelling_blocks
+
             block = QaModelBlock(params,4*d,self.trainable)
             input = {
-                params.context_name :tf.concat(attention_outputs, axis = -1)
+                params.context_name :output[params.context_name]#tf.concat(attention_outputs, axis = -1)
                 ,"context_mask":tf.cast(tf.expand_dims(tf.sign(self.c),-1),tf.float32)
                 ,"question_mask":tf.cast(tf.expand_dims(tf.sign(self.q),-1),tf.float32)
 
@@ -217,15 +226,16 @@ class Model(object):
             #             reuse = True if i > 0 else None,
             #             dropout = self.dropout)
             #         )
-        self.enc = [None,output["M0"],output["M1"],output["M2"]]
-        with tf.variable_scope("Output_Layer"):
-            start_logits = tf.squeeze(conv(tf.concat([self.enc[1], self.enc[2]],axis = -1),1, bias = False, name = "start_pointer"),-1)
-            end_logits = tf.squeeze(conv(tf.concat([self.enc[1], self.enc[3]],axis = -1),1, bias = False, name = "end_pointer"), -1)
-            self.logits = [mask_logits(start_logits, mask = self.c_mask),
-                           mask_logits(end_logits, mask = self.c_mask)]
-
-            logits1, logits2 = [l for l in self.logits]
-
+       # self.enc = [None,output["M0"],output["M1"],output["M2"]]
+        with tf.variable_scope("Output_Layer",initializer=xavier_initializer()):
+            # start_logits = tf.squeeze(conv(tf.concat([self.enc[1], self.enc[2]],axis = -1),1, bias = False, name = "start_pointer"),-1)
+            # end_logits = tf.squeeze(conv(tf.concat([self.enc[1], self.enc[3]],axis = -1),1, bias = False, name = "end_pointer"), -1)
+            # self.logits = [mask_logits(start_logits, mask = self.c_mask),
+            #                mask_logits(end_logits, mask = self.c_mask)]
+            #
+            # logits1, logits2 = [l for l in self.logits]
+            outlayer  = QAOutputLayer(params,feature_size=d,is_trainning=self.trainable)
+            logits1, logits2  = outlayer(output)
             outer = tf.matmul(tf.expand_dims(tf.nn.softmax(logits1), axis=2),
                               tf.expand_dims(tf.nn.softmax(logits2), axis=1))
             outer = tf.matrix_band_part(outer, 0, config.ans_limit)

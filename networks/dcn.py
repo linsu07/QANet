@@ -1,7 +1,7 @@
 import  tensorflow as tf
 import math
 
-from ultra.comprehension.parameter import user_params
+from networks.parameter import user_params
 '''
   * Created by linsu on 2018/8/30.
   * mailto: lsishere2002@hotmail.com
